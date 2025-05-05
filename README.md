@@ -45,7 +45,7 @@ A real-time audio recording and sharing application built with React, Socket.IO,
    ```
 
 This will launch:
-- The React frontend at [http://localhost:5173](http://localhost:5173)
+- The React frontend at [http://localhost:8080](http://localhost:8080)
 - The Socket.IO server at [http://localhost:3001](http://localhost:3001)
 
 ## Usage
