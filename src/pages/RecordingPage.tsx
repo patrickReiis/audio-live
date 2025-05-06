@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label';
 import { io, Socket } from 'socket.io-client';
 import { getBestSupportedFormat, getFileExtension, logSupportedFormats } from '@/lib/audioUtils';
 import { logBrowserInfo, logAudioCapabilities, logPermissions } from '@/lib/debug';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
 const SERVER_URL = 'http://localhost:3001';
 
@@ -24,14 +25,21 @@ const RecordingPage = () => {
   const [isAudioAvailable, setIsAudioAvailable] = useState(true);
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const [sessionCreated, setSessionCreated] = useState(false);
+  const [connectedToRoom, setConnectedToRoom] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [sessionError, setSessionError] = useState<{code: string, message: string} | null>(null);
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const socketRef = useRef<Socket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const dataTimerRef = useRef<number | null>(null);
+  const prevMuteStateRef = useRef<boolean>(false);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const isProcessingStopRef = useRef<boolean>(false);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   
-  // Check browser support for various audio formats
+  // Check browser support for audio recording
   useEffect(() => {
     // Log debugging information
     logBrowserInfo();
@@ -61,54 +69,167 @@ const RecordingPage = () => {
         console.error("Microphone access error:", err);
         setIsAudioAvailable(false);
       });
+      
+    // Create audio element for remote audio
+    const audioEl = new Audio();
+    audioEl.autoplay = true;
+    audioEl.muted = false;
+    audioEl.volume = 1.0;
+    
+    // Some browsers require interaction before playing audio
+    const enableAudio = () => {
+      audioEl.play().catch(err => {
+        console.log("Initial audio play failed, waiting for user interaction", err);
+      });
+      document.removeEventListener('click', enableAudio);
+    };
+    document.addEventListener('click', enableAudio);
+    
+    remoteAudioRef.current = audioEl;
+    
+    return () => {
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.pause();
+        remoteAudioRef.current.src = '';
+      }
+    };
   }, []);
   
-  // Initialize the component
+  // Initialize the component and connect to socket
   useEffect(() => {
+    console.log("Initializing with session ID:", sessionId);
+    setIsLoading(true);
+    
     // Connect to socket server
     socketRef.current = io(SERVER_URL);
+    const socket = socketRef.current;
     
-    // If we have a sessionId, join that session
-    if (sessionId) {
-      socketRef.current.emit('join-session', sessionId);
-      setIsHost(false);
+    // Setup event listeners for socket
+    socket.on('connect', () => {
+      console.log('Connected to server with socket id:', socket.id);
+      
+      if (sessionId) {
+        // Try to join existing session
+        console.log("Attempting to join session:", sessionId);
+        socket.emit('join-session', sessionId);
+      } else {
+        // No session ID - we're ready to create one
+        console.log('No session ID, ready to host');
+        setIsHost(true);
+        setIsLoading(false);
+      }
+    });
+    
+    // Handle connection successful
+    socket.on('connection-successful', ({ sessionId: sid, role }) => {
+      console.log(`Successfully connected to session ${sid} as ${role}`);
+      activeSessionIdRef.current = sid;
+      setIsHost(role === 'host');
       setSessionCreated(true);
-    } else {
-      // If no sessionId, we're the host
-      setIsHost(true);
-      setSessionCreated(false);
-    }
+      setConnectedToRoom(true);
+      setIsLoading(false);
+    });
+    
+    // Handle session errors
+    socket.on('session-error', ({ code, message }) => {
+      console.error(`Session error: ${code} - ${message}`);
+      setSessionError({ code, message });
+      setIsLoading(false);
+    });
+    
+    socket.on('connect_error', (err) => {
+      console.error('Socket.IO connection error:', err);
+      setRecordingError(`Connection error: ${err.message}. Please reload the page.`);
+      setIsLoading(false);
+    });
     
     // Listen for new participants
-    socketRef.current.on('participant-joined', (participantId: string) => {
-      setParticipants(prev => [...prev, participantId]);
+    socket.on('participant-joined', (participantId: string) => {
       console.log("Participant joined:", participantId);
+      setParticipants(prev => {
+        if (prev.includes(participantId)) return prev;
+        return [...prev, participantId];
+      });
     });
     
     // Listen for participants leaving
-    socketRef.current.on('participant-left', (participantId: string) => {
-      setParticipants(prev => prev.filter(id => id !== participantId));
+    socket.on('participant-left', (participantId: string) => {
       console.log("Participant left:", participantId);
+      setParticipants(prev => prev.filter(id => id !== participantId));
+    });
+    
+    // Listen for participants list when joining
+    socket.on('participants-list', (list: string[]) => {
+      console.log("Received participants list:", list);
+      setParticipants(list);
     });
     
     // Listen for audio data from other participants
-    socketRef.current.on('audio-chunk', (audioChunk: Blob) => {
+    socket.on('audio-chunk', (data) => {
       try {
-        // Play the received audio chunk
-        const audioBlob = new Blob([audioChunk], { type: 'audio/webm' });
-        const audioUrl = URL.createObjectURL(audioBlob);
-        const audio = new Audio(audioUrl);
-        audio.onended = () => URL.revokeObjectURL(audioUrl);
-        audio.play().catch(err => console.error("Error playing received audio:", err));
+        console.log("Received audio chunk from another participant");
+        const blob = new Blob([data], { type: 'audio/webm' });
+        
+        if (blob.size > 0) {
+          // Create a URL for the blob
+          const url = URL.createObjectURL(blob);
+          
+          // Play the remote audio
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.src = url;
+            remoteAudioRef.current.onended = () => URL.revokeObjectURL(url);
+            
+            // Ensure audio is playing
+            remoteAudioRef.current.play().catch(err => {
+              console.error("Failed to play remote audio:", err);
+            });
+          }
+          
+          // Store remote audio chunks for our recording
+          if (isRecording) {
+            console.log("Adding remote audio to local recording");
+            audioChunksRef.current.push(blob);
+          }
+        }
       } catch (error) {
-        console.error("Error processing received audio chunk:", error);
+        console.error("Error handling received audio:", error);
+      }
+    });
+    
+    // Listen for session stop signals from other participants
+    socket.on('stop-recording', () => {
+      console.log("Received stop recording signal from session");
+      
+      if (!isProcessingStopRef.current && isRecording) {
+        isProcessingStopRef.current = true;
+        stopRecording(false);
+      }
+    });
+    
+    socket.on('session-closed', (closedSessionId) => {
+      console.log(`Session ${closedSessionId} has been closed`);
+      
+      if (activeSessionIdRef.current === closedSessionId) {
+        console.log("Our current session was closed");
+        
+        if (isRecording) {
+          stopRecording(false);
+        }
+        
+        // Show message without redirecting
+        setSessionError({
+          code: 'SESSION_CLOSED',
+          message: 'This recording session has been closed by the host.'
+        });
       }
     });
     
     // Clean up on unmount
     return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
+      console.log("Component unmounting, cleaning up resources");
+      
+      if (socket) {
+        socket.disconnect();
       }
       
       if (streamRef.current) {
@@ -127,7 +248,24 @@ const RecordingPage = () => {
         clearInterval(dataTimerRef.current);
       }
     };
-  }, [sessionId]);
+  }, [sessionId, navigate]);
+  
+  // Watch for changes to mute state and apply them
+  useEffect(() => {
+    if (isRecording && prevMuteStateRef.current !== isMuted) {
+      console.log("Mute state changed to:", isMuted);
+      
+      if (streamRef.current) {
+        streamRef.current.getAudioTracks().forEach(track => {
+          track.enabled = !isMuted;
+          console.log(`Audio track ${track.id} enabled:`, track.enabled);
+        });
+      }
+      
+      // Update reference for next comparison
+      prevMuteStateRef.current = isMuted;
+    }
+  }, [isMuted, isRecording]);
   
   // Process audio data when recording stops
   const processRecordedAudio = () => {
@@ -157,13 +295,20 @@ const RecordingPage = () => {
     }
   };
   
-  // Create a new Nostr session ID if we're the host
+  // Create a new session ID if we're the host
   const createSession = async () => {
-    if (isHost && !sessionId && !sessionCreated) {
+    if (isHost && !sessionCreated) {
       const newSessionId = uuidv4();
-      socketRef.current?.emit('create-session', newSessionId);
-      navigate(`/recording/${newSessionId}`, { replace: true });
-      setSessionCreated(true);
+      console.log("Creating new session with ID:", newSessionId);
+      
+      if (socketRef.current) {
+        socketRef.current.emit('create-session', newSessionId);
+        activeSessionIdRef.current = newSessionId;
+        setSessionCreated(true);
+        setConnectedToRoom(true);
+        navigate(`/recording/${newSessionId}`, { replace: true });
+      }
+      
       return newSessionId;
     }
     return sessionId;
@@ -176,8 +321,9 @@ const RecordingPage = () => {
     audioChunksRef.current = [];
     
     try {
-      // Create a session if needed
+      // Create or join a session
       const activeSessionId = await createSession();
+      activeSessionIdRef.current = activeSessionId;
       console.log("Active session ID:", activeSessionId);
       
       // Get microphone access
@@ -190,6 +336,13 @@ const RecordingPage = () => {
       });
       
       streamRef.current = stream;
+      
+      // Apply mute state immediately if necessary
+      if (isMuted) {
+        stream.getAudioTracks().forEach(track => {
+          track.enabled = false;
+        });
+      }
       
       // Set up MediaRecorder with supported options
       const options = { mimeType: audioFormat };
@@ -208,14 +361,23 @@ const RecordingPage = () => {
       // Debug recording state
       console.log("MediaRecorder initial state:", mediaRecorder.state);
       
+      // Handle data available events
       mediaRecorder.ondataavailable = (event) => {
-        console.log("Data available event. Size:", event.data.size);
         if (event.data.size > 0) {
+          console.log("Audio data available event. Size:", event.data.size);
+          
+          // Add to our local recording chunks
           audioChunksRef.current.push(event.data);
           
-          // Send audio chunk to server if we're not muted
-          if (socketRef.current && !isMuted) {
-            socketRef.current.emit('audio-chunk', event.data, activeSessionId);
+          // Send audio chunk to server if we're not muted and connected to a session
+          if (socketRef.current && activeSessionIdRef.current) {
+            // Only send audio if not muted
+            if (!isMuted) {
+              console.log(`Sending audio chunk to session ${activeSessionIdRef.current}`);
+              socketRef.current.emit('audio-chunk', event.data, activeSessionIdRef.current);
+            } else {
+              console.log("Not sending audio because we're muted");
+            }
           }
         }
       };
@@ -231,20 +393,30 @@ const RecordingPage = () => {
       
       mediaRecorder.onerror = (event: any) => {
         console.error("MediaRecorder error:", event);
-        setRecordingError(`Recording error: ${event.error}`);
+        setRecordingError(`Recording error: ${event.error || 'Unknown error'}`);
       };
       
-      // Start recording - with a small time slice value to ensure we get data
-      mediaRecorder.start(500); // Collect data every 500ms
+      // Start recording - with a smaller time slice for more frequent chunks
+      mediaRecorder.start(250); // Collect data every 250ms
       
       // Set a timer to periodically request data to ensure we have something
       dataTimerRef.current = window.setInterval(() => {
         if (mediaRecorder && mediaRecorder.state === 'recording') {
           mediaRecorder.requestData();
         }
-      }, 2000);
+      }, 1000);
       
+      // Initialize mute state tracking
+      prevMuteStateRef.current = isMuted;
+      
+      // Update recording state
       setIsRecording(true);
+      isProcessingStopRef.current = false;
+      
+      // Announce that we're recording in this session
+      if (socketRef.current && activeSessionId) {
+        socketRef.current.emit('recording-started', activeSessionId);
+      }
       
     } catch (error) {
       console.error('Error starting recording:', error);
@@ -252,11 +424,24 @@ const RecordingPage = () => {
     }
   };
   
-  // Enhanced stop recording function
-  const stopRecording = () => {
-    console.log("Stopping recording...");
+  // Enhanced stop recording function - with optional emit parameter
+  const stopRecording = (emitEvent = true) => {
+    console.log("Stopping recording... Emit event:", emitEvent);
     
     try {
+      // Set flag to prevent multiple stop processes
+      if (isProcessingStopRef.current) {
+        console.log("Already processing stop, ignoring duplicate request");
+        return;
+      }
+      isProcessingStopRef.current = true;
+      
+      // Notify other participants if we should emit the event
+      if (emitEvent && socketRef.current && activeSessionIdRef.current) {
+        console.log("Broadcasting stop recording signal to session:", activeSessionIdRef.current);
+        socketRef.current.emit('stop-recording', activeSessionIdRef.current);
+      }
+      
       // First clear our data request timer
       if (dataTimerRef.current) {
         clearInterval(dataTimerRef.current);
@@ -286,8 +471,9 @@ const RecordingPage = () => {
               
               // Update UI state
               setIsRecording(false);
+              isProcessingStopRef.current = false;
             }
-          }, 200);
+          }, 300);
         } else {
           console.warn("MediaRecorder not in recording state:", mediaRecorderRef.current.state);
           
@@ -297,10 +483,12 @@ const RecordingPage = () => {
           }
           
           setIsRecording(false);
+          isProcessingStopRef.current = false;
         }
       } else {
         console.warn("MediaRecorder not initialized");
         setIsRecording(false);
+        isProcessingStopRef.current = false;
       }
     } catch (error) {
       console.error("Error stopping recording:", error);
@@ -308,12 +496,49 @@ const RecordingPage = () => {
       
       // Force UI update even on error
       setIsRecording(false);
+      isProcessingStopRef.current = false;
       
       // If there was an error but we have chunks, try to process them
       if (audioChunksRef.current.length > 0) {
         processRecordedAudio();
       }
     }
+  };
+  
+  // Close the session completely (host only)
+  const closeSession = () => {
+    if (isHost && activeSessionIdRef.current) {
+      console.log("Closing session:", activeSessionIdRef.current);
+      
+      if (isRecording) {
+        stopRecording(false);
+      }
+      
+      // Tell server to close the session
+      if (socketRef.current) {
+        socketRef.current.emit('close-session', activeSessionIdRef.current);
+      }
+      
+      // Navigate back to home
+      navigate('/');
+    } else {
+      // Non-hosts just leave the session
+      leaveSession();
+    }
+  };
+  
+  // Leave the current session
+  const leaveSession = () => {
+    if (activeSessionIdRef.current && socketRef.current) {
+      if (isRecording) {
+        stopRecording(false);
+      }
+      
+      socketRef.current.emit('leave-session', activeSessionIdRef.current);
+    }
+    
+    // Navigate back to home
+    navigate('/');
   };
   
   // Save recording function
@@ -326,7 +551,15 @@ const RecordingPage = () => {
       console.log("Current MIME type:", currentMimeType);
       
       // Determine the correct file extension based on format
-      const fileExtension = getFileExtension(currentMimeType);
+      let fileExtension = 'webm'; // Default fallback
+      
+      if (currentMimeType.includes('mp3') || currentMimeType.includes('mpeg')) {
+        fileExtension = 'mp3';
+      } else if (currentMimeType.includes('ogg')) {
+        fileExtension = 'ogg';
+      } else if (currentMimeType.includes('webm')) {
+        fileExtension = 'webm';
+      }
       
       const a = document.createElement('a');
       document.body.appendChild(a);
@@ -363,6 +596,8 @@ const RecordingPage = () => {
   
   // Copy session link function
   const copySessionLink = () => {
+    if (!sessionId && !activeSessionIdRef.current) return;
+    
     const url = window.location.href;
     navigator.clipboard.writeText(url)
       .then(() => {
@@ -374,6 +609,66 @@ const RecordingPage = () => {
       });
   };
   
+  // Handle session error display and retry
+  const handleSessionError = () => {
+    navigate('/', { replace: true });
+  };
+  
+  // Loading state
+  if (isLoading && sessionId) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
+        <Card className="w-full max-w-md shadow-lg">
+          <CardHeader>
+            <CardTitle className="text-center">
+              Connecting to Session...
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col items-center">
+            <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+            <p className="text-center">
+              Checking if session {sessionId.substring(0, 8)}... exists
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+  
+  // Session error state
+  if (sessionError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
+        <Card className="w-full max-w-md shadow-lg">
+          <CardHeader>
+            <CardTitle className="text-center text-red-500">
+              Session Error
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Alert variant="destructive" className="mb-4">
+              <AlertTitle>{sessionError.code}</AlertTitle>
+              <AlertDescription>{sessionError.message}</AlertDescription>
+            </Alert>
+            <p className="text-center text-gray-600 mb-4">
+              {sessionError.code === 'SESSION_NOT_FOUND' ? 
+                "The session you're trying to join doesn't exist or has already ended." :
+                sessionError.code === 'SESSION_CLOSED' ?
+                "The host has ended this recording session." :
+                "There was an error with the recording session."}
+            </p>
+          </CardContent>
+          <CardFooter className="flex justify-center">
+            <Button onClick={handleSessionError}>
+              Return to Home
+            </Button>
+          </CardFooter>
+        </Card>
+      </div>
+    );
+  }
+  
+  // Microphone not available state
   if (!isAudioAvailable) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
@@ -398,6 +693,7 @@ const RecordingPage = () => {
     );
   }
   
+  // Main app view
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
       <Card className="w-full max-w-md shadow-lg">
@@ -405,10 +701,10 @@ const RecordingPage = () => {
           <CardTitle className="text-center">
             {isHost ? 'Host Audio Session' : 'Join Audio Session'}
           </CardTitle>
-          {sessionId && (
+          {(sessionId || activeSessionIdRef.current) && (
             <div className="flex justify-center mt-2">
               <Badge variant="outline" className="text-xs">
-                Session: {sessionId.substring(0, 8)}...
+                Session: {(sessionId || activeSessionIdRef.current)?.substring(0, 8)}...
               </Badge>
               <Button 
                 variant="ghost" 
@@ -423,7 +719,7 @@ const RecordingPage = () => {
         </CardHeader>
         
         <CardContent>
-          {sessionId && (
+          {(sessionId || activeSessionIdRef.current) && (
             <div className="mb-4 p-3 bg-blue-50 rounded-md border border-blue-100">
               <p className="text-sm text-blue-700">
                 {isHost 
@@ -432,11 +728,24 @@ const RecordingPage = () => {
               </p>
             </div>
           )}
+          
+          {/* Connection status indicator */}
+          <div className="flex items-center mb-4 space-x-2">
+            <div className={`w-2 h-2 rounded-full ${connectedToRoom ? 'bg-green-500' : 'bg-yellow-500'}`}></div>
+            <span className="text-xs text-gray-600">
+              {connectedToRoom 
+                ? `Connected to session ${activeSessionIdRef.current?.substring(0, 8) || ''}` 
+                : 'Not connected to any session'}
+            </span>
+          </div>
         
           {participants.length > 0 && (
             <div className="mb-4">
-              <h3 className="text-sm font-medium mb-2">Participants</h3>
+              <h3 className="text-sm font-medium mb-2">Participants ({participants.length + 1})</h3>
               <div className="flex flex-wrap gap-2">
+                <Badge variant="secondary" className="bg-green-100">
+                  You
+                </Badge>
                 {participants.map((id) => (
                   <Badge key={id} variant="secondary">
                     User {id.substring(0, 5)}
@@ -466,8 +775,8 @@ const RecordingPage = () => {
             {/* Status indicator */}
             {isRecording && (
               <div className="flex items-center mt-2 space-x-2">
-                <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
-                <span className="text-sm">Recording...</span>
+                <div className={`w-3 h-3 rounded-full ${isMuted ? 'bg-gray-500' : 'bg-red-500 animate-pulse'}`}></div>
+                <span className="text-sm">{isMuted ? 'Recording (Muted)' : 'Recording...'}</span>
               </div>
             )}
             
@@ -490,7 +799,7 @@ const RecordingPage = () => {
           
           {isRecording && (
             <Button 
-              onClick={stopRecording} 
+              onClick={() => stopRecording(true)}
               variant="destructive" 
               className="flex items-center gap-2 px-4 py-2"
             >
@@ -513,10 +822,16 @@ const RecordingPage = () => {
             </>
           )}
           
-          {!audioURL && !isRecording && !isHost && (
-            <Button onClick={createNewSession} variant="outline">
-              Leave Session
-            </Button>
+          {!audioURL && (sessionId || activeSessionIdRef.current) && (
+            isHost ? (
+              <Button onClick={closeSession} variant="outline" className="text-red-500 border-red-300">
+                Close Session
+              </Button>
+            ) : (
+              <Button onClick={leaveSession} variant="outline">
+                Leave Session
+              </Button>
+            )
           )}
         </CardFooter>
       </Card>

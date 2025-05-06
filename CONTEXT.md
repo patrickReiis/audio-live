@@ -1,198 +1,79 @@
-# Project Overview
+# Audio Live - Updates and Improvements
 
-This project is a Nostr client application built with React 18.x, TailwindCSS 3.x, Vite, shadcn/ui, and Nostrify.
+## Summary of Recent Updates
 
-## Technology Stack
+This document serves as a reference for all recent significant improvements and fixes to the Audio Live application.
 
-- **React 18.x**: Stable version of React with hooks, concurrent rendering, and improved performance
-- **TailwindCSS 3.x**: Utility-first CSS framework for styling
-- **Vite**: Fast build tool and development server
-- **shadcn/ui**: Unstyled, accessible UI components built with Radix UI and Tailwind
-- **Nostrify**: Nostr protocol framework for Deno and web
-- **React Router**: For client-side routing
-- **TanStack Query**: For data fetching, caching, and state management
-- **TypeScript**: For type-safe JavaScript development
+## Core Functionality Improvements
 
-## Project Structure
+### Audio Sharing Between Participants
 
-- `/src/components/`: UI components including NostrProvider for Nostr integration
-- `/src/hooks/`: Custom hooks including `useNostr` and `useNostrQuery`
-- `/src/pages/`: Page components used by React Router
-- `/src/lib/`: Utility functions and shared logic
-- `/public/`: Static assets
+- Fixed real-time audio streaming between participants in the same session
+- Implemented proper handling of audio chunks via Socket.IO
+- Added browser autoplay workarounds to ensure audio plays on all devices
+- Ensured both local and remote audio are included in recordings
+- Added more detailed logging to help troubleshoot audio transmission issues
 
-## UI Components
+### Session Management
 
-The project uses shadcn/ui components located in `@/components/ui`. These are unstyled, accessible components built with Radix UI and styled with Tailwind CSS. Available components include:
+- Enhanced session creation and joining logic
+- Added better error handling for non-existent sessions
+- Fixed "SESSION_NOT_FOUND" errors during session creation
+- Made session closure more user-friendly (no automatic redirection)
+- Improved host controls and participant management
 
-- **Accordion**: Vertically collapsing content panels
-- **Alert**: Displays important messages to users
-- **AlertDialog**: Modal dialog for critical actions requiring confirmation
-- **AspectRatio**: Maintains consistent width-to-height ratio
-- **Avatar**: User profile pictures with fallback support
-- **Badge**: Small status descriptors for UI elements
-- **Breadcrumb**: Navigation aid showing current location in hierarchy
-- **Button**: Customizable button with multiple variants and sizes
-- **Calendar**: Date picker component 
-- **Card**: Container with header, content, and footer sections
-- **Carousel**: Slideshow for cycling through elements
-- **Chart**: Data visualization component
-- **Checkbox**: Selectable input element
-- **Collapsible**: Toggle for showing/hiding content
-- **Command**: Command palette for keyboard-first interfaces
-- **ContextMenu**: Right-click menu component
-- **Dialog**: Modal window overlay
-- **Drawer**: Side-sliding panel
-- **DropdownMenu**: Menu that appears from a trigger element
-- **Form**: Form validation and submission handling
-- **HoverCard**: Card that appears when hovering over an element
-- **InputOTP**: One-time password input field
-- **Input**: Text input field
-- **Label**: Accessible form labels
-- **Menubar**: Horizontal menu with dropdowns
-- **NavigationMenu**: Accessible navigation component
-- **Pagination**: Controls for navigating between pages
-- **Popover**: Floating content triggered by a button
-- **Progress**: Progress indicator
-- **RadioGroup**: Group of radio inputs
-- **Resizable**: Resizable panels and interfaces
-- **ScrollArea**: Scrollable container with custom scrollbars
-- **Select**: Dropdown selection component
-- **Separator**: Visual divider between content
-- **Sheet**: Side-anchored dialog component
-- **Sidebar**: Navigation sidebar component
-- **Skeleton**: Loading placeholder
-- **Slider**: Input for selecting a value from a range
-- **Sonner**: Toast notification manager
-- **Switch**: Toggle switch control
-- **Table**: Data table with headers and rows
-- **Tabs**: Tabbed interface component
-- **Textarea**: Multi-line text input
-- **Toast**: Toast notification component
-- **ToggleGroup**: Group of toggle buttons
-- **Toggle**: Two-state button
-- **Tooltip**: Informational text that appears on hover
+### File Format & Handling
 
-These components follow a consistent pattern using React's `forwardRef` and use the `cn()` utility for class name merging. Many are built on Radix UI primitives for accessibility and customized with Tailwind CSS.
+- Fixed file extension issues - now correctly saves as .mp3, .ogg, or .webm
+- Enhanced MIME type detection for more reliable format identification
+- Added explicit fallbacks for audio format detection
+- Improved audio chunk collection and processing
 
-## Nostr Protocol Integration
+## User Experience Improvements
 
-This project comes with custom hooks for querying and publishing events on the Nostr network.
+### Interface Enhancements
 
-### The `useNostr` Hook
+- Simplified home page with a single "Create New Session" button
+- Improved session status indicators
+- Added better visual feedback during loading and connection states
+- Enhanced error messages with more specific information
+- Fixed participant counter and listing
 
-The `useNostr` hook returns an object containing a `nostr` property, with `.query()` and `.event()` methods for querying and publishing Nostr events respectively.
+### Error Handling
 
-```typescript
-import { useNostr } from '@nostrify/react';
+- Improved error screens with clearer messages
+- Removed automatic redirects after session closure
+- Enhanced session validation flow
+- Added better user guidance during error states
 
-function useCustomHook() {
-  const { nostr } = useNostr();
+## Technical Improvements
 
-  // ...
-}
-```
+### Client-Side
 
-### Query Nostr Data with `useNostr` and Tanstack Query
+- Fixed race conditions in session handling
+- Improved socket connection management
+- Enhanced audio element initialization
+- Added better debug logging
+- Implemented browser compatibility workarounds
 
-When querying Nostr, the best practice is to create custom hooks that combine `useNostr` and `useQuery` to get the required data.
+### Server-Side
 
-```typescript
-import { useNostr } from '@nostrify/react';
-import { useQuery } from '@tanstack/query';
+- Added comprehensive event logging
+- Improved session data structure
+- Enhanced audio chunk broadcasting
+- Added fault tolerance for common edge cases
+- Improved session cleanup logic
 
-function usePosts() {
-  const { nostr } = useNostr();
+## Known Limitations
 
-  return useQuery({
-    queryKey: ['posts'],
-    queryFn: async (c) => {
-      const signal = AbortSignal.any([c.signal, AbortSignal.timeout(1500)]);
-      const events = await nostr.query([{ kinds: [1], limit: 20 }], { signal });
-      return events; // these events could be transformed into another format
-    },
-  });
-}
-```
+- Audio quality depends on the browser's supported formats
+- Some browsers may require user interaction before playing audio
+- Large audio files may experience latency when transmitted
 
-The data may be transformed into a more appropriate format if needed, and multiple calls to `nostr.query()` may be made in a single queryFn.
+## Future Considerations
 
-### The `useNostrPublish` Hook
-
-To publish events, use the `useNostrPublish` hook in this project.
-
-```tsx
-import { useState } from 'react';
-
-import { useCurrentUser } from "@/hooks/useCurrentUser";
-import { useNostrPublish } from '@/hooks/useNostrPublish';
-
-export function MyComponent() {
-  const [ data, setData] = useState<Record<string, string>>({});
-
-  const { user } = useCurrentUser();
-  const { mutate: createEvent } = useNostrPublish();
-
-  const handleSubmit = () => {
-    createEvent({ kind: 1, content: data.content });
-  };
-
-  if (!user) {
-    return <span>You must be logged in to use this form.</span>;
-  }
-
-  return (
-    <form onSubmit={handleSubmit} disabled={!user}>
-      {/* ...some input fields */}
-    </form>
-  );
-}
-```
-
-The `useCurrentUser` hook should be used to ensure that the user is logged in before they are able to publish Nostr events.
-
-### Nostr Login
-
-To enable login with Nostr, simply use the `LoginArea` component already included in this project.
-
-```tsx
-import { LoginArea } from "@/components/auth/LoginArea";
-
-function MyComponent() {
-  return (
-    <div>
-      {/* other components ... */}
-
-      <LoginArea />
-    </div>
-  );
-}
-```
-
-The `LoginArea` component displays a "Log in" button when the user is logged out, and changes to an account switcher once the user is logged in. It handles all the login-related UI and interactions internally, including displaying login dialogs and switching between accounts.
-
-## Development Practices
-
-- Uses React Query for data fetching and caching
-- Follows shadcn/ui component patterns
-- Implements Path Aliases with `@/` prefix for cleaner imports
-- Uses Vite for fast development and production builds
-- Component-based architecture with React hooks
-- Default connection to multiple Nostr relays for network redundancy
-
-## Build & Deployment
-
-- Build for production: `npm run build`
-- Development build: `npm run build:dev`
-
-## Testing Your Changes
-
-Whenever you modify code, you should test your changes after you're finished by running:
-
-```bash
-npm run ci
-```
-
-This command will typecheck the code and attempt to build it.
-
-Your task is not considered finished until this test passes without errors.
+- Add recording duration indicator
+- Implement recording quality settings
+- Add visual waveform for audio visualization
+- Implement more sophisticated audio mixing
+- Add session persistence for longer recordings
